@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QH Smart AI - Face & Object Detection</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-detection@0.0.6/dist/face-detection.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.0/firebase-firestore-compat.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .detection-area {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            margin: 0 auto;
+            border: 2px solid #3b3b3b;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .detection-box {
+            position: absolute;
+            border: 2px solid #00ff00;
+            background-color: rgba(0, 255, 0, 0.1);
+            z-index: 10;
+        }
+        .object-box {
+            position: absolute;
+            border: 2px solid #ffff00;
+            background-color: rgba(255, 255, 0, 0.1);
+            z-index: 10;
+            color: white;
+            font-size: 12px;
+            padding: 2px;
+        }
+        .controls {
+            margin-top: 20px;
+            text-align: center;
+        }
+        button {
+            background-color: #007AFF;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 0 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0066cc;
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #2d2d2d;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>QH Smart AI</h1>
+            <p>Real-time Face & Object Detection</p>
+        </div>
+
+        <div class="detection-area" id="detectionArea">
+            <video id="videoElement" playsinline></video>
+        </div>
+
+        <div class="controls">
+            <button id="startButton">Start Detection</button>
+            <button id="stopButton">Stop Detection</button>
+            <select id="modelSelect">
+                <option value="face">Face Detection</option>
+                <option value="object">Object Detection</option>
+                <option value="both">Both</option>
+            </select>
+        </div>
+
+        <div class="stats">
+            <h3>Detection Stats</h3>
+            <p>Faces Detected: <span id="faceCount">0</span></p>
+            <p>Objects Detected: <span id="objectCount">0</span></p>
+            <p>Detection Time: <span id="detectionTime">0</span>ms</p>
+        </div>
+    </div>
+
+    <script>
+        // Firebase Configuration
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_AUTH_DOMAIN",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // DOM Elements
+        const videoElement = document.getElementById('videoElement');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const modelSelect = document.getElementById('modelSelect');
+        const faceCountElement = document.getElementById('faceCount');
+        const objectCountElement = document.getElementById('objectCount');
+        const detectionTimeElement = document.getElementById('detectionTime');
+
+        // App State
+        let faceModel = null;
+        let objectModel = null;
+        let detectionInterval = null;
+        let stream = null;
+
+        // Initialize Models
+        async function initModels() {
+            try {
+                faceModel = await faceDetection.SupportedModels.MediaPipeFaceDetector;
+                objectModel = await cocoSsd.load();
+                console.log("Models loaded successfully");
+                return true;
+            } catch (error) {
+                console.error("Error loading models:", error);
+                return false;
+            }
+        }
+
+        // Start Camera
+        async function startCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: 640, 
+                        height: 480,
+                        facingMode: 'user' 
+                    },
+                    audio: false 
+                });
+                videoElement.srcObject = stream;
+                return true;
+            } catch (error) {
+                console.error("Error accessing camera:", error);
+                alert("Could not access camera. Please check permissions.");
+                return false;
+            }
+        }
+
+        // Start Detection
+        async function startDetection() {
+            const modelType = modelSelect.value;
+            
+            if (!faceModel || !objectModel) {
+                alert("Models not loaded yet. Please wait.");
+                return;
+            }
+
+            if (!stream) {
+                const cameraStarted = await startCamera();
+                if (!cameraStarted) return;
+            }
+
+            detectionInterval = setInterval(async () => {
+                const startTime = performance.now();
+                
+                // Clear previous boxes
+                document.querySelectorAll('.detection-box, .object-box').forEach(el => el.remove());
+                
+                if (modelType === 'face' || modelType === 'both') {
+                    const faces = await detectFaces();
+                    updateFaceCount(faces.length);
+                    drawFaceBoxes(faces);
+                }
+                
+                if (modelType === 'object' || modelType === 'both') {
+                    const objects = await detectObjects();
+                    updateObjectCount(objects.length);
+                    drawObjectBoxes(objects);
+                }
+                
+                const endTime = performance.now();
+                updateDetectionTime(endTime - startTime);
+            }, 300);
+        }
+
+        // Stop Detection
+        function stopDetection() {
+            if (detectionInterval) {
+                clearInterval(detectionInterval);
+                detectionInterval = null;
+            }
+            
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+                videoElement.srcObject = null;
+            }
+            
+            document.querySelectorAll('.detection-box, .object-box').forEach(el => el.remove());
+            resetCounters();
+        }
+
+        // Face Detection
+        async function detectFaces() {
+            try {
+                const detector = await faceDetection.createDetector(faceModel);
+                const faces = await detector.estimateFaces(videoElement);
+                return faces;
+            } catch (error) {
+                console.error("Face detection error:", error);
+                return [];
+            }
+        }
+
+        // Object Detection
+        async function detectObjects() {
+            try {
+                const predictions = await objectModel.detect(videoElement);
+                return predictions;
+            } catch (error) {
+                console.error("Object detection error:", error);
+                return [];
+            }
+        }
+
+        // Draw Face Boxes
+        function drawFaceBoxes(faces) {
+            faces.forEach(face => {
+                const box = document.createElement('div');
+                box.className = 'detection-box';
+                box.style.left = `${face.box.xMin}px`;
+                box.style.top = `${face.box.yMin}px`;
+                box.style.width = `${face.box.width}px`;
+                box.style.height = `${face.box.height}px`;
+                document.getElementById('detectionArea').appendChild(box);
+            });
+        }
+
+        // Draw Object Boxes
+        function drawObjectBoxes(objects) {
+            objects.forEach(obj => {
+                const box = document.createElement('div');
+                box.className = 'object-box';
+                box.style.left = `${obj.bbox[0]}px`;
+                box.style.top = `${obj.bbox[1]}px`;
+                box.style.width = `${obj.bbox[2]}px`;
+                box.style.height = `${obj.bbox[3]}px`;
+                box.textContent = `${obj.class} (${Math.round(obj.score * 100)}%)`;
+                document.getElementById('detectionArea').appendChild(box);
+            });
+        }
+
+        // Update Counters
+        function updateFaceCount(count) {
+            faceCountElement.textContent = count;
+        }
+
+        function updateObjectCount(count) {
+            objectCountElement.textContent = count;
+        }
+
+        function updateDetectionTime(time) {
+            detectionTimeElement.textContent = time.toFixed(2);
+        }
+
+        function resetCounters() {
+            updateFaceCount(0);
+            updateObjectCount(0);
+            updateDetectionTime(0);
+        }
+
+        // Event Listeners
+        startButton.addEventListener('click', async () => {
+            startButton.disabled = true;
+            await startDetection();
+            startButton.disabled = false;
+        });
+
+        stopButton.addEventListener('click', stopDetection);
+
+        // Initialize App
+        document.addEventListener('DOMContentLoaded', async () => {
+            const modelsLoaded = await initModels();
+            if (modelsLoaded) {
+                console.log("App initialized successfully");
+            } else {
+                alert("Failed to load AI models. Please check console for errors.");
+            }
+        });
+
+        // Save to Firestore (example)
+        async function saveDetection(data) {
+            try {
+                await db.collection('detections').add({
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp(),
+                    ...data
+                });
+            } catch (error) {
+                console.error("Error saving detection:", error);
+            }
+        }
+    </script>
+</body>
+</html>
